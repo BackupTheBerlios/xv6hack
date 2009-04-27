@@ -49,6 +49,8 @@ main0(void)
   pic_init();
   ioapic_init();
   kinit(); // physical memory allocator
+  kmem_cache_init();
+  kmem_cache_sizes_init();
   tvinit(); // trap vectors
   idtinit(); // this CPU's interrupt descriptor table
   fileinit();

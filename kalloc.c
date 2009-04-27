@@ -333,12 +333,31 @@ void update_obj(struct slab *slabp)
 
 void part_to_full(struct slab *slabp)
 {
+	struct cache *c = slabp->cache;
 
+	slabp->prev->next = slabp->next;
+	slabp->next->prev = slabp->prev;
+
+	slabp->prev = c->sfull->prev;
+	slabp->next = c->sfull;
+	c->sfull->prev = slabp;
+
+	/* need to get the lock */
+	
 }
 
 void full_to_part(struct slab *slabp)
 {
+	struct cache *c = slabp->cache;
 
+	slabp->prev->next = slabp->next;
+	slabp->next->prev = slabp->prev;
+
+	slabp->prev = c->spart->prev;
+	slabp->next = c->spart;
+	c->spart->prev = slabp;
+
+	/* need to get the lock */
 }
 
 static inline void *getobj(struct slab *slabp)
@@ -502,14 +521,25 @@ static struct cache_size cache_sizes[8] = {
 	{1024,		NULL}
 };
 
+void *kmalloc(int size);
+
 /* init slab/sizes chaches*/
 int kmem_cache_sizes_init(void)
 {
 	int i;
+	char *test;
 
 	for(i=0; i<8; i++) {
 		/* create size slab */
+		cache_sizes[i].cache = kmem_cache_create(cache_sizes[i].size, NULL, NULL); 
 	}
+
+	test = kmalloc(20);
+
+	if(test)
+		cprintf("kmalloc 20 success\n");
+	else
+		cprintf("kmalloc 20 fail\n");
 
 	return 0;
 }
