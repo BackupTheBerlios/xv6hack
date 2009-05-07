@@ -40,6 +40,7 @@ kinit(void)
   mem = 256; // assume computer has 256 pages of RAM
   cprintf("mem = %d\n", mem * PAGE);
   kfree(start, mem * PAGE);
+	cprintf("mem start is %p\n", start);
 }
 
 // Free the len bytes of memory pointed at by cp,
@@ -136,25 +137,26 @@ kalloc(int n)
 #define getpage()	kalloc(PAGE)
 #define putpage(p)	kfree(p, PAGE)
 #define OBJ_MIN		8
-#define OBJ_MAX		4096
-#define SLAB_MAGIC_UNINIT 0x12345678
+#define OBJ_MAX		3956 /* PAGE - sizeof(struct slab) */
 #define SLAB_MAGIC_INIT 0xabbaabba
 #define SLAB_FREE_MAX	8
 
-/* cache - slabs (one slab - one page) */
+struct cache *foo_cache;
 
+/* cache - slabs (one slab - one page) */
+/* move to defs.h
 struct cache {
 	struct cache *next;
 	struct cache *prev;
-	struct slab *sfull; /* the full slab */
-	struct slab *spart; /* the partial slab */
-	struct slab *sfree; /* the free slab */
-	int objsize; /* object size */
-	void (*ctor)(void *); /* creator */ 
-	void (*dtor)(void *); /* destroctor */
+	struct slab *sfull;
+	struct slab *spart;
+	struct slab *sfree;
+	int objsize;
+	void (*ctor)(void *);
+	void (*dtor)(void *);
 	struct spinlock lock;
 };
-
+*/
 struct slab {
 	struct cache *cache;
 	struct slab *next;
@@ -186,48 +188,48 @@ static inline void slab_clrbit(struct slab *slabp, int i)
 	slabp->objmap[j] &= ~(1 << k);
 }
 
+static inline int slab_getbit(struct slab *slabp, int i)
+{
+	int j,k;
+
+	j = i/8;
+	k = i%8;
+
+	return slabp->objmap[j] & (1 << k);
+}
+
 static inline int slab_first_free_bit(struct slab *slabp)
 {
-	int i, j, k = -1;
+	int i, k = -1;
 
-	for (i = 0; i<64 ;i++)
-		for (j = 0; j < 8; j++)
-			if (!(slabp->objmap[i] & (1 << j))) {
-				k = i * 8 + j;
-				break;
-			}
+	for (i = 0; i<(64 * 8) ;i++)
+		if (!slab_getbit(slabp, i)) {
+			k = i;
+			break;
+		}
 	return k;
 }
 
 static inline int slab_free_bit_count(struct slab *slabp)
 {
-	int i, j, k = 0;
+	int i, k = 0;
 
-	for (i = 0; i<64 ;i++)
-		for (j = 0; j < 8; j++)
-			if (slabp->objmap[i] & (1 << j))
-				k++;
+	for (i = 0; i<(64 * 8); i++)
+		if (!slab_getbit(slabp, i))
+			k++;
 	return k;
 }
 
-int slab_obj_all_free(struct slab *slabp)
+static int slab_obj_all_free(struct slab *slabp)
 {
-	int i, j, k = 1;
-
-	for (i = 0; i<64 ;i++)
-		for (j = 0; j < 8; j++)
-			if (slabp->objmap[i] & (1 << j)) {
-				k = 0;
-				break;
-			}
-	return k;
+	return slab_free_bit_count(slabp) == 64 * 8;
 }
 
 
-struct cache *cache_head;
-struct cache *cache_tail;
+static struct cache *cache_head;
+static struct cache *cache_tail;
 
-struct cache cache_cache;
+static struct cache cache_cache;
 
 /* cache_cahce init */
 void kmem_cache_init(void)
@@ -252,9 +254,10 @@ void kmem_cache_init(void)
  */
 static int kmem_cache_grow(struct cache *cache)
 {
-	struct slab *slabp = cache->spart;
+	struct slab *slabp = NULL;
 	void *mem;
 
+	cprintf("grow\n");
 	mem = getpage();		
 	if(!mem)
 		return -1;
@@ -272,7 +275,7 @@ static int kmem_cache_grow(struct cache *cache)
 	memset(slabp->objmap, 0, 64);
 
 	if (cache->ctor)
-		while (mem < (void *)slabp) {
+		while ((mem + cache->objsize) < (void *)slabp) {
 			cache->ctor(mem);
 			mem += cache->objsize;
 		}
@@ -280,8 +283,9 @@ static int kmem_cache_grow(struct cache *cache)
 	slabp->magic = SLAB_MAGIC_INIT;
 
 link:
-	slabp->next = cache->sfree;
-	cache->sfree->prev = slabp;
+	slabp->prev = NULL;
+	slabp->next = NULL;
+	cache->sfree = slabp;
 
 	return 0;
 }
@@ -321,17 +325,17 @@ static int slab_free(struct slab *slabp)
 	return 0;
 }
 
-void update_obj(struct slab *slabp)
+static void update_obj(struct slab *slabp)
 {
 	int i, size;
 
 	i = slab_first_free_bit(slabp);
 	size = slabp->cache->objsize;
 
-	slabp->obj = slabp + sizeof(struct slab) - PAGE + i * size;
+	slabp->obj = (void *)((int)slabp + sizeof(struct slab) + i * size - PAGE);
 }
 
-void part_to_full(struct slab *slabp)
+static void part_to_full(struct slab *slabp)
 {
 	struct cache *c = slabp->cache;
 
@@ -346,7 +350,7 @@ void part_to_full(struct slab *slabp)
 	
 }
 
-void full_to_part(struct slab *slabp)
+static void full_to_part(struct slab *slabp)
 {
 	struct cache *c = slabp->cache;
 
@@ -365,6 +369,8 @@ static inline void *getobj(struct slab *slabp)
 	int i;
 	void *obj = slabp->obj;
 
+	if (!obj)
+		cprintf("wrong address\n");
 	if (!slab_free_bit_count(slabp)) {
 		cprintf("No space in this slab\n");
 		return NULL;
@@ -405,7 +411,7 @@ static inline void putobj(struct slab *slabp, void *obj)
 		slab_free(slabp);
 }
 
-struct slab *find_part(struct cache *cache)
+static struct slab *find_part(struct cache *cache)
 {
 	struct slab *p = NULL;
 
@@ -417,7 +423,7 @@ struct slab *find_part(struct cache *cache)
 	return p;
 }
 
-struct slab *free_to_part(struct cache *cache)
+static struct slab *free_to_part(struct cache *cache)
 {
 	struct slab *slabp;
 
@@ -427,23 +433,31 @@ struct slab *free_to_part(struct cache *cache)
 	cache->sfree->prev = NULL;
 
 	slabp->next = cache->spart;
-	cache->spart->prev = slabp;
+
+	if(cache->spart)
+		cache->spart->prev = slabp;
+
+	cache->spart = slabp;
 
 	return slabp;
 }
 
 void *kmem_cache_alloc(struct cache *cache)
 {
+	int ret;
 	struct slab *slabp;
 
 	acquire(&cache->lock);
 
 	slabp = find_part(cache);
+
 	if (slabp)
 		goto ge;
 
 	if (!cache->sfree) {
-		kmem_cache_grow(cache);
+		ret = kmem_cache_grow(cache);
+		if (ret < 0)
+			return NULL;
 		/* there's no free slab, need create one */
 	} 
 
@@ -485,6 +499,8 @@ struct cache *kmem_cache_create(int size, void (*ctor)(void*),
 	cache_tail->next = cachep;
 	cache_tail = cachep;
 	release(&kalloc_lock);
+
+	return cachep;
 out:
 	return NULL;
 }
@@ -493,7 +509,7 @@ int kmem_cache_free(void *obj)
 {
 	struct slab *slabp;
 	
-	slabp = (struct slab *)((uint)obj | (PAGE -1)) - sizeof(struct slab);
+	slabp = (struct slab *)(((uint)obj & ~(PAGE -1)) + PAGE - sizeof(struct slab));
 	/* set the bitmap to 0 */
 	putobj(slabp, obj);
 	
@@ -522,25 +538,20 @@ static struct cache_size cache_sizes[8] = {
 };
 
 void *kmalloc(int size);
+void slab_test(void);
 
 /* init slab/sizes chaches*/
 int kmem_cache_sizes_init(void)
 {
 	int i;
-	char *test;
 
 	for(i=0; i<8; i++) {
 		/* create size slab */
 		cache_sizes[i].cache = kmem_cache_create(cache_sizes[i].size, NULL, NULL); 
+		cprintf("cache_size - %d: %p\n", cache_sizes[i].size, cache_sizes[i].cache);
 	}
 
-	test = kmalloc(20);
-
-	if(test)
-		cprintf("kmalloc 20 success\n");
-	else
-		cprintf("kmalloc 20 fail\n");
-
+	slab_test();
 	return 0;
 }
 
@@ -549,11 +560,16 @@ void *kmalloc(int size)
 	int i;
 
 	for(i=0; i<8; i++) {
-		if (size > cache_sizes[i].size)
-			return kmem_cache_alloc(cache_sizes[i].cache);		
+		if (size >= cache_sizes[i].size) {
+
+			if (i<7 && size < cache_sizes[i+1].size)
+				return kmem_cache_alloc(cache_sizes[i].cache);		
+			if (i==7 && size == cache_sizes[i].size)
+				return kmem_cache_alloc(cache_sizes[i].cache);		
+		}
 	}
 
-	cprintf("size too large for kmalloc\n");
+	cprintf("size too large for kmalloc, please use kalloc instead\n");
 	return NULL;
 }
 
@@ -562,4 +578,76 @@ int kmfree(void *obj)
 	kmem_cache_free(obj);
 
 	return 0;
+}
+
+struct foo {
+	struct spinlock lock;
+	int val;
+	struct foo *next;
+	char t[10];
+};
+
+void __foo_init(void * obj)
+{
+	int i;
+	struct foo *f = (struct foo *)obj;
+
+	initlock(&f->lock, "flock");
+	f->val = 1;
+	f->next = NULL;
+	for (i=0; i<10; i++)
+		f->t[i] = 'a';		
+}
+
+void __foo_exit(void * obj)
+{
+	;
+}
+
+void slab_test(void)
+{
+	int i;
+	char *test;
+	struct foo *ftest[8];
+
+	test = kmalloc(100);
+
+	if(test)
+		cprintf("kmalloc 100 success : %p\n", test);
+	else
+		cprintf("kmalloc 100 fail\n");
+
+	cprintf("foo_cache creat ..\n");
+	foo_cache = kmem_cache_create(sizeof(struct foo), __foo_init, __foo_exit);
+	if (!foo_cache) {
+		cprintf("foo_cache creat failed\n");
+		return;
+	}
+
+	cprintf("foo_cache created: %p\n", foo_cache);
+
+	for (i=0; i<8; i++) {
+		ftest[i] = kmem_cache_alloc(foo_cache);
+		cprintf("struct foo alloced: %p\n", ftest[i]);
+	}
+
+	cprintf("struct foo free: %p\n", ftest[0]);
+	kmem_cache_free(ftest[0]);
+	ftest[0] = kmem_cache_alloc(foo_cache);
+	cprintf("struct foo alloced again: %p\n", ftest[0]);
+
+	cprintf("struct foo free: %p\n", ftest[1]);
+	kmem_cache_free(ftest[1]);
+	ftest[0] = kmem_cache_alloc(foo_cache);
+	cprintf("struct foo alloced again: %p\n", ftest[1]);
+
+	cprintf("struct foo free: %p\n", ftest[2]);
+	kmem_cache_free(ftest[2]);
+	ftest[0] = kmem_cache_alloc(foo_cache);
+	cprintf("struct foo alloced again: %p\n", ftest[2]);
+
+	cprintf("struct foo free: %p\n", ftest[3]);
+	kmem_cache_free(ftest[3]);
+	ftest[0] = kmem_cache_alloc(foo_cache);
+	cprintf("struct foo alloced again: %p\n", ftest[3]);
 }

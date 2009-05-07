@@ -1,7 +1,28 @@
 // kalloc.c
+#include "spinlock.h"
+struct cache {
+	struct cache *next;
+	struct cache *prev;
+	struct slab *sfull; /* the full slab */
+	struct slab *spart; /* the partial slab */
+	struct slab *sfree; /* the free slab */
+	int objsize; /* object size */
+	void (*ctor)(void *); /* creator */ 
+	void (*dtor)(void *); /* destroctor */
+	struct spinlock lock;
+};
+
 char* kalloc(int);
 void kfree(char*, int);
 void kinit(void);
+void kmem_cache_init(void);
+int kmem_cache_sizes_init(void);
+struct cache *kmem_cache_create(int size, void (*ctor)(void*),
+					void (*dtor)(void*));
+void *kmem_cache_alloc(struct cache *cache);
+int kmem_cache_free(void *obj);
+void *kmalloc(int size);
+int kmfree(void *obj);
 
 // console.c
 void console_init(void);
